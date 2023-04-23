@@ -1,215 +1,308 @@
-from calendar import c
-import math
-from turtle import distance
-from pyspark import SparkConf, SparkContext
 import sys
-import time
 import numpy as np
 from collections import defaultdict
 from sklearn.cluster import KMeans
+import itertools
 
-def write_csv_file(result_str, output_file):
+def write_csv(output_file, result_str, result):
     with open(output_file, "w") as f:
-        result_header = "user_id, business_id, prediction\n"
-        f.writelines(result_header)
-        f.writelines(result_str)
+        result_str += "\n"
+        result_str += "The clustering results:\n"
+        f.write(result_str)
+        for point in sorted(result.keys()):
+            f.write(str(point) + ',' + str(result[point]) + '\n')           
+    return
 
-def mahanabolis_dis(point, cluster):
-    N, SUM, SUMSQ = cluster
-    centroid = SUM / N
-    sigma = (SUMSQ / N) - (SUM / N) ** 2
-    z = (point[1] - centroid)/sigma
-    m_distance = np.dot(z, z) ** (1/2)
-    return m_distance
+def create_cluster_dict(labels):
+    cluster_dict = defaultdict(list)   
+    for idx, c_id in enumerate(labels):
+        cluster_dict[c_id].append(idx)
+    return cluster_dict
 
-if __name__ == "__main__":
-    sc = SparkContext()
+def calculate_stats(cs_cluster, ds_cluster):
+    num_d = sum(value[0] for value in ds_cluster.values())
+    num_c = sum(value[0] for value in cs_cluster.values())  
+    return num_c, num_d
 
-    # input_file = sys.argv[1]
-    # n_clusters = int(sys.argv[2])
-    # output_file = sys.argv[3]
+def get_cluster_statistics(data, clusters, flag):
+    cluster = defaultdict(list)
+    point_dict = defaultdict(list)
+    centroid_dict = defaultdict(list)
+    deviation_dict = defaultdict(list)
 
-    input_file = "BFR-algorithm/data/hw6_clustering.txt"
-    n_clusters = 15
-    output_file = "BFR-algorithm/result/task.csv"
+    if flag == "CS":
+        for cid, idx in clusters.items():
+            if len(idx) > 1:
+                feature = data[idx, 2:]
+                N = len(idx)
+                SUM = np.sum(feature, axis = 0)
+                SUMSQ = np.sum(np.square(feature), axis = 0)
 
-    d = 0
+                points = np.array(data[idx, 0]).astype(int).tolist()
+                centroid = SUM / N
+                deviation = np.sqrt((SUMSQ / N) - np.square(centroid))
 
-    data = sc.textFile(input_file)
+                cluster[cid] = [N, SUM, SUMSQ]
+                point_dict[cid] = points
+                centroid_dict[cid] = centroid
+                deviation_dict[cid] = deviation
 
-    data = data.map(lambda x: x.strip("\n").split(',')) \
-                    .map(lambda x: (int(x[0]), np.array(x[2:], dtype=np.float64)))
+    elif flag == "DS":
+        for cid, idx in clusters.items():
+            feature = data[idx, 2:]
+            N = len(idx)
+            SUM = np.sum(feature, axis = 0)
+            SUMSQ = np.sum(np.square(feature), axis = 0)
+
+            points = np.array(data[idx, 0]).astype(int).tolist()
+            centroid = SUM / N
+            deviation = np.sqrt((SUMSQ / N) - np.square(centroid))
+
+            cluster[cid] = [N, SUM, SUMSQ]
+            point_dict[cid] = points
+            centroid_dict[cid] = centroid
+            deviation_dict[cid] = deviation
+
+    return cluster, point_dict, centroid_dict, deviation_dict
+
+def calculate_min_distance(given_cluster, centroid_dict, deviation_dict):
+    maxx = float('inf')
+    cluster = -1
+    for cid in given_cluster.keys():
+        mahalanobis_dis = mahalanobis_point_cluster(data, centroid_dict[cid], deviation_dict[cid])
+        if mahalanobis_dis < maxx:
+            maxx = mahalanobis_dis
+            cluster = cid
     
-    features_array = data.first()[1]
-    d = len(features_array)
+    return maxx, cluster
+
+def update_cluster_statistics(chunk, cid, value, cluster, point_dict, centroid_dict, deviation_dict):
+    N = cluster[cid][0] + 1
+    SUM = np.add(cluster[cid][1], chunk)
+    SUMSQ = np.add(cluster[cid][2], np.square(chunk))
+
+    centroid = SUM / N
+    deviation = np.sqrt((SUMSQ / N) - np.square(centroid))
+
+    cluster[cid] = [N, SUM, SUMSQ]
+    centroid_dict[cid] = centroid
+    deviation_dict[cid] = deviation
+
+    point_dict[cid].append(int(value[0]))
+
+    return cluster, point_dict, centroid_dict, deviation_dict
+
+def mahalanobis_point_cluster(data, centroid, deviation):
+    mahalanobis_dis = np.sqrt(np.sum(np.square(np.divide(np.subtract(data, centroid), deviation)), axis=0))
+    return mahalanobis_dis
+
+def mahalanobis_cluster_cluster(centroid1, centroid2, deviation1, deviation2):
+
+    mahalanobis_dis1 = np.sqrt(np.sum(np.square(np.divide(np.subtract(centroid1, centroid2), deviation2, out=np.zeros_like(np.subtract(centroid1, centroid2)), where=deviation2 != 0)), axis=0))
+    mahalanobis_dis2 = np.sqrt(np.sum(np.square(np.divide(np.subtract(centroid2, centroid1), deviation1, out=np.zeros_like(np.subtract(centroid2, cs_centroid[cid1])), where=deviation1 != 0)), axis=0))
+    mahalanobis_dis = min(mahalanobis_dis1, mahalanobis_dis2)
+
+    return mahalanobis_dis
+
+def merged_cluster_statistics(cluster_1, cluster_2):
+
+    N = cluster_1[0] + cluster_2[0]
+    SUM = np.add(cluster_1[1], cluster_2[1])
+    SUMSQ = np.add(cluster_1[2], cluster_2[2])
+
+    centroid = SUM / N
+    deviation = np.sqrt(np.subtract(SUMSQ / N, np.square(centroid)))
+
+    return [N,SUM,SUMSQ], centroid, deviation
+   
+if __name__ == "__main__":
+
+    input_file = sys.argv[1]
+    n_clusters = int(sys.argv[2])
+    output_file = sys.argv[3]
+
+    # input_file = "BFR-algorithm/data/hw6_clustering.txt"
+    # n_clusters = 10
+    # output_file = "BFR-algorithm/result/task.csv"
+
+    #variables
+    NO_OF_CHUNKS = 5
+
+    #initializations
+    RS = set()
+
+    ds_cluster = defaultdict(list)
+    ds_point = defaultdict(list)
+    ds_centroid = defaultdict(list)  
+    ds_deviation = defaultdict(list)
+
+    cs_cluster = defaultdict(list)
+    cs_point = defaultdict(list)
+    cs_centroid = defaultdict(list)  
+    cs_deviation = defaultdict(list)
+
+    D = 0
+
+    np.random.seed(42)
+
+    npdata = np.genfromtxt(input_file, delimiter=',')
 
     # Step 1. Load 20% of the data randomly.
-    data = data.randomSplit([0.2, 0.8], seed=42)
 
-    chunk_data = data[0]
-    chunk_len = len(chunk_data.collect())
-    remaining_data = data[1]
-
-    # print(len(chunk_data.collect()))
-    # print(len(remaining_data.collect()))
+    np.random.shuffle(npdata)
+    npdata = np.array_split(npdata, NO_OF_CHUNKS)
+    first_chunk = npdata[0]
 
     # Step 2. Run K-Means with a large K 
+
     K = 5 * n_clusters
-
-    vector_list = chunk_data.map(lambda x: x[1]).collect()
-
-    k_means = KMeans(n_clusters = K, n_init = 10).fit(vector_list)
+    features = first_chunk[:, 2:]
+    k_means_1 = KMeans(n_clusters = K).fit(features)
 
     # Step 3. Move all the clusters that contain only one point to RS
 
-    labels = k_means.labels_
-    counts = np.bincount(k_means.labels_)
+    cluster_dict = create_cluster_dict(k_means_1.labels_)
+    rs = set([idx[0] for idx in cluster_dict.values() if len(idx) == 1])
 
-    cluster_dict = defaultdict(list)
-
-    for idx, c_id in enumerate(labels):
-        cluster_dict[c_id].append(idx)
-    
-    rs_indices = [idx[0] for idx in cluster_dict.values() if len(idx) == 1]
-
-    chunk_with_RS = [vector_list[i] for i in rs_indices]
-
-    chunk_without_RS = np.delete(np.array(vector_list), rs_indices, axis=0)
+    without_rs = np.delete(first_chunk, list(rs), axis = 0)
 
     # Step 4. Run K-Means again to cluster the rest of the data points with K = the number of input clusters
     
     K = n_clusters
-    k_means = KMeans(n_clusters = K, n_init = 10).fit(chunk_without_RS)
-
+    features = without_rs[:, 2:]
+    k_means_2 = KMeans(n_clusters = K).fit(features)
 
     # Step 5. Use the K-Means result from Step 4 to generate the DS clusters
 
-    labels = k_means.labels_
-    clusters = defaultdict(list)
-    ds_clusters = defaultdict(list)
-    ds_point_dict = defaultdict(list)
-    ds_centroid_dict = defaultdict(list)
-    ds_distance_dict = defaultdict(list)
-
-    for idx, c_id in enumerate(labels):
-        clusters[c_id].append(idx)
-
-    for c_id, idx in clusters.items():
-        N = len(idx)
-
-        feature_vectors = chunk_without_RS[idx, :]
-        SUM = np.sum(feature_vectors, axis=0)
-        SUMSQ = np.sum(np.square(feature_vectors), axis=0)
-
-        points = np.array(chunk_without_RS[idx, 0]).astype(int).tolist()
-        centroid = SUM / N
-
-        distance_from_centroid = np.sqrt(np.subtract(SUMSQ / N, np.square(centroid)))
-
-        ds_clusters[c_id] = [N, SUM, SUMSQ]
-        ds_point_dict[c_id] = points
-        ds_centroid_dict[c_id] = centroid
-        ds_distance_dict[c_id] = distance_from_centroid
-
-    # print(len(ds_clusters))
-
-#     Step 6. Run K-Means on the points in the RS with a large K (e.g., 5 times of the number of the input
+    cluster_dict = create_cluster_dict(k_means_2.labels_)
+    ds_cluster, ds_point, ds_centroid, ds_deviation = get_cluster_statistics(without_rs, cluster_dict, "DS")
+    
+    #     Step 6. Run K-Means on the points in the RS with a large K (e.g., 5 times of the number of the input
 # clusters) to generate CS (clusters with more than one points) and RS (clusters with only one point).
 
-    cs_clusters = defaultdict(list)
+    with_rs = first_chunk[list(rs), :]
+    K = 5 * n_clusters
 
-    if len(rs_indices) >= 5 * n_clusters:
-        K_rs = 5 * n_clusters
-        k_means_rs = KMeans(n_clusters = K_rs, n_init = 10).fit(chunk_with_RS)
+    if len(rs) >= K :
+        features = with_rs[:, 2:]
+        k_means_3 = KMeans(n_clusters = K).fit(features)
 
-        labels = k_means_rs.labels_
-        cluster_dict = defaultdict(list)
+        cluster_dict = create_cluster_dict(k_means_3.labels_)
+        rs = set([idx[0] for idx in cluster_dict.values() if len(idx) == 1])
 
-        for idx, c_id in enumerate(labels):
-            cluster_dict[c_id].append(idx)
-
-        rs_indices = [idx[0] for idx in cluster_dict.values() if len(idx) == 1]
-
-
-        cs_clusters = defaultdict(list)
-        cs_point_dict = defaultdict(list)
-        cs_centroid_dict = defaultdict(list)
-        cs_distance_dict = defaultdict(list)
-
-        for c_id, idx in cluster_dict.items():
-            N = len(idx)
-
-            feature_vectors = chunk_with_RS[idx, :]
-            SUM = np.sum(feature_vectors, axis=0)
-            SUMSQ = np.sum(np.square(feature_vectors), axis=0)
-            points = np.array(chunk_without_RS[idx, 0]).astype(int).tolist()
-            centroid = SUM / N
-            distance_from_centroid = np.sqrt(np.subtract(SUMSQ / N, np.square(centroid)))
-
-            cs_clusters[c_id] = [N, SUM, SUMSQ]
-            cs_point_dict[c_id] = points
-            cs_centroid_dict[c_id] = centroid
-            cs_distance_dict[c_id] = distance_from_centroid
-        
+        cs_cluster, cs_point, cs_centroid, cs_deviation = get_cluster_statistics(with_rs, cluster_dict, "CS")
     
-    num_d = 0
-    num_c = 0
-
-    for value in ds_clusters.values():
-        num_d += value[0]
-
-    for value in cs_clusters.values():
-        num_c += value[0]
+    num_c, num_d = calculate_stats(cs_cluster, ds_cluster)
 
     result_str = "The intermediate results:\n"
-    result_str += 'Round 1: ' + str(num_d) + ',' + str(len(cs_clusters)) + ',' + str(num_c) + ',' + str(len(rs_indices)) + '\n'
+    result_str += 'Round 1: ' + str(num_d) + ',' + str(len(cs_cluster)) + ',' + str(num_c) + ',' + str(len(rs)) + '\n'
 
 
+    #Step 7 - 12
+    D = 2 * np.sqrt(first_chunk.shape[1] - 2)
 
-    #Step 7-12
+    for i in range(1, 5):
+        #Step 7
+        chunk = npdata[i]
+        for idx, value in enumerate(chunk):
+            data = value[2:]
 
-    remaining_data = remaining_data.collect()
-    for i in range(4):
+            #Step 8
+            maxx, cluster = calculate_min_distance(ds_cluster, ds_centroid, ds_deviation)  
 
-        #Step 7: Load another 20% of the data randomly
-        chunk = remaining_data[:chunk_len]
-        remaining_data = remaining_data[chunk_len:]
-
-        # Step 8. For the new points, compare them to each of the DS using the Mahalanobis Distance and assign them to the nearest DS clusters if the distance is < 2 root(𝑑).
-
-        D = 2 * math.sqrt(d)
-        cluster = -1
-
-        for i in range(chunk_len):
-            point = chunk[i]
-            distance_dict = dict()
-
-            for c_id, values in ds_clusters.items():
-                distance_dict[c_id] = mahanabolis_dis(point, values)  
-
-            max_distance = min(list(distance_dict.values()))
-
-            for c_id in distance_dict:
-                if distance_dict[c_id] == max_distance:
-                    cluster = c_id
-        
-        print(type(chunk))
-        if max_distance < D and cluster != -1:
-            N, SUM, SUMSQ = ds_clusters[cluster]
-            N += 1
-            SUM = np.add(SUM, chunk[1])
-            SUMSQ = np.add(SUMSQ, np.square(chunk[1]))
-
-            centroid = SUM / N
-            distance_from_centroid = np.sqrt(np.subtract(SUMSQ / N, np.square(centroid)))
-
-            ds_clusters[cluster] = [N, SUM, SUMSQ]
-            ds_centroid_dict[cluster] = centroid
-            ds_distance_dict[cluster] = distance_from_centroid
-            ds_point_dict[cluster].append(int(chunk[0]))
-
-            print(ds_point_dict)
-
-        
-
+            if maxx < D and cluster != -1:
+                ds_cluster, ds_point, ds_centroid, ds_deviation = update_cluster_statistics(data, cluster, value, ds_cluster, ds_point, ds_centroid, ds_deviation)
                 
+            else:
+
+                #Step 9
+                maxx, cluster = calculate_min_distance(cs_cluster, cs_centroid, cs_deviation)
+
+                if maxx < D and cluster != -1:
+                    cs_cluster, cs_point, cs_centroid, cs_deviation = update_cluster_statistics(data, cluster, value, cs_cluster, cs_point, cs_centroid, cs_deviation)
+
+                else:
+                    #step 10
+                    rs.add(idx)
+
+        #step 11
+
+        data_rs = chunk[list(rs), :]
+        K = 5 * n_clusters
+
+        if len(rs) >= K:
+
+            features = data_rs[:, 2:]
+            k_means_4 = KMeans(n_clusters = K).fit(features)
+
+            cluster_dict = create_cluster_dict(k_means_4.labels_)
+            rs = set([idx[0] for idx in cluster_dict.values() if len(idx) == 1])
+                    
+            cs_cluster, cs_point, cs_centroid, cs_deviation = get_cluster_statistics(data_rs, cluster_dict, "CS")
+
+        #step 12
+        merged_cs_cs_clusters = dict()
+        cluster = -1
+        for cid1, cid2 in itertools.combinations(cs_cluster.keys(), 2):
+            mahalanobis_dis = mahalanobis_cluster_cluster(cs_centroid[cid1], cs_centroid[cid2], cs_deviation[cid1], cs_deviation[cid2])
+            if mahalanobis_dis < D:
+                D = mahalanobis_dis
+                cluster = cid2
+
+            merged_cs_cs_clusters[cid1] = cluster
+ 
+        for cid1, cid2 in merged_cs_cs_clusters.items():
+            if cid1 in cs_cluster and cid2 in cs_cluster:
+                if cid1 != cid2:
+
+                    stats, centroid, deviation = merged_cluster_statistics(cs_cluster[cid1], cs_cluster[cid2])
+
+                    cs_cluster[cid2] = stats
+                    cs_centroid[cid2] = centroid
+                    cs_deviation[cid2] = deviation
+                    cs_point[cid2].extend(cs_point[cid1])
+           
+                    cs_cluster.pop(cid2)
+                    cs_centroid.pop(cid2)
+                    cs_deviation.pop(cid2)
+                    cs_point.pop(cid2)
+
+        #step 13 last iteration
+        if i == 4:
+            merged_cs_ds_clusters = dict()
+            for cid1, cid2 in itertools.product(cs_cluster.keys(), ds_cluster.keys()):
+                if cid1 != cid2:
+                    mahalanobis_dis = mahalanobis_cluster_cluster(cs_centroid[cid1], ds_centroid[cid2], cs_deviation[cid1], ds_deviation[cid2])                        
+                    if mahalanobis_dis < D:
+                        D = mahalanobis_dis
+                        cluster = cid2
+                    
+                    merged_cs_ds_clusters[cid1] = cid2
+
+            for cid1, cid2 in merged_cs_ds_clusters.items():
+                if cid1 in cs_cluster and cid2 in ds_cluster:
+                    if cid1 != cid2:
+
+                        stats, centroid, deviation = merged_cluster_statistics(cs_cluster[cid1], ds_cluster[cid2])
+                        
+                        ds_cluster[cid2] = stats
+                        ds_centroid[cid2] = centroid    
+                        ds_deviation[cid2] = deviation
+                        ds_point[cid2].extend(cs_point[cid1])
+
+                        cs_cluster.pop(cid1)
+                        cs_centroid.pop(cid1)
+                        cs_deviation.pop(cid1)
+                        cs_point.pop(cid1)
+        
+        num_c, num_d = calculate_stats(cs_cluster, ds_cluster)
+
+        result_str += 'Round ' + str(i+1) + ': ' + str(num_d) + ',' + str(len(cs_cluster)) + ',' + str(num_c) + ',' + str(len(rs)) + '\n'
+    
+    rs = set(int(n) for n in npdata[4][list(rs), 0])
+
+    result = {point: cid for cid, points in ds_point.items() for point in points}
+    result.update({point: -1 for cid, points in cs_point.items() for point in points})
+    result.update({point: -1 for point in rs})
+
+    write_csv(output_file, result_str, result)
